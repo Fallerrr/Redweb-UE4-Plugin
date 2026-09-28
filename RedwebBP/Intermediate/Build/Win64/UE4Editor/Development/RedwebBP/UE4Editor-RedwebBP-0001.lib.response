@@ -1,0 +1,13 @@
+/NOLOGO
+/errorReport:prompt
+/MACHINE:x64
+/SUBSYSTEM:WINDOWS
+/DEF
+/NAME:"UE4Editor-RedwebBP-0001.dll"
+/IGNORE:4221
+/NODEFAULTLIB
+"D:\Gemhouse\Intermediate\Build\Win64\GemhouseEditor\Development\Engine\SharedPCH.Engine.ShadowErrors.h.obj"
+"D:\Gemhouse\Plugins\RedwebBP\Intermediate\Build\Win64\UE4Editor\Development\RedwebBP\Module.RedwebBP.cpp.obj"
+"D:\Gemhouse\Plugins\RedwebBP\Intermediate\Build\Win64\UE4Editor\Development\RedwebBP\Module.RedwebBP.gen.cpp.obj"
+"D:\Gemhouse\Plugins\RedwebBP\Intermediate\Build\Win64\UE4Editor\Development\RedwebBP\Default.rc2.res"
+/OUT:"D:\Gemhouse\Plugins\RedwebBP\Intermediate\Build\Win64\UE4Editor\Development\RedwebBP\UE4Editor-RedwebBP-0001.lib"

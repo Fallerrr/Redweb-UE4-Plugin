@@ -1,0 +1,13 @@
+{
+	"RemapUnityFiles": 
+	{
+		"Module.RedwebBP.cpp.obj": [
+			"RedwebBPModule.cpp.obj",
+			"RedwebSocketComponent.cpp.obj"
+		],
+		"Module.RedwebBP.gen.cpp.obj": [
+			"RedwebBP.init.gen.cpp.obj",
+			"RedwebSocketComponent.gen.cpp.obj"
+		]
+	}
+}

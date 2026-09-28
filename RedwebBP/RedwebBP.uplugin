@@ -1,0 +1,19 @@
+{
+  "FileVersion": 3,
+  "Version": 4,
+  "VersionName": "3.0.0-native-winhttp",
+  "FriendlyName": "Redweb Blueprint Sockets",
+  "Description": "Blueprint-friendly Redweb WebSocket client with a dedicated native WinHTTP transport. Supports ws:// and wss:// with typed JSON message helpers.",
+  "Category": "Networking",
+  "CreatedBy": "OpenAI for Ahmad Mazrui",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "RedwebBP",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ]
+}
