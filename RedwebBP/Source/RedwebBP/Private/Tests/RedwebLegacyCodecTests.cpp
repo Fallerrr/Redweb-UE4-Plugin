@@ -94,6 +94,10 @@ bool FRedwebLegacyCodecAutomationTest::RunTest(const FString& Parameters)
         TestFalse(TEXT("The protocol envelope version is not leaked into the payload"), VersionedPayloadObject->HasField(TEXT("v")));
     }
 
+    TestTrue(TEXT("Protocol envelopes can carry scalar payloads"), URedwebSocketComponent::ExtractTypedPayload(
+        TEXT("{\"v\":\"1\",\"type\":\"status\",\"payload\":\"ready\"}"), Type, Payload));
+    TestEqual(TEXT("Scalar payload JSON is preserved as a root value"), Payload, FString(TEXT("\"ready\"")));
+
     TestTrue(TEXT("Protocol errors are decoded as typed Redweb errors"), URedwebSocketComponent::ExtractTypedPayload(
         TEXT("{\"v\":\"1\",\"type\":\"error\",\"error\":{\"code\":\"UNKNOWN_HANDLER\",\"message\":\"Unknown handler\"}}"),
         Type, Payload));

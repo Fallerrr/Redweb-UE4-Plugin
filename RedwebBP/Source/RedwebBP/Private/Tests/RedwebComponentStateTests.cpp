@@ -161,6 +161,11 @@ bool FRedwebComponentStateAutomationTest::RunTest(const FString& Parameters)
     Component->QueryParams.Add(Query);
     TestEqual(TEXT("URL construction encodes query keys and values"), Component->BuildFullUrl(),
         FString(TEXT("ws://example.test/room?redwebVersion=1&room%20name=a%26b")));
+    Component->ServerUrl = TEXT("ws://example.test?token=base&redwebVersion=old");
+    Component->RoutePath = TEXT("/room?access=route");
+    TestEqual(TEXT("Existing server and route query parameters are preserved with one protocol version"),
+        Component->BuildFullUrl(),
+        FString(TEXT("ws://example.test/room?token=base&access=route&redwebVersion=1&room%20name=a%26b")));
     TestFalse(TEXT("The disconnected component reports no open socket"), Component->IsConnected());
     TestFalse(TEXT("Unframed JSON fails cleanly without a connected socket"), Component->SendJson(TEXT("{}"), FString()));
     TestFalse(TEXT("Valid typed JSON fails cleanly without a connected socket"), Component->SendJson(TEXT("{}"), TEXT("event")));

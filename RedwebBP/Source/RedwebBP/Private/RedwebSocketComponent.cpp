@@ -38,6 +38,18 @@ namespace
         return SerializeObject(Envelope);
     }
 
+    bool SerializeJsonValue(const TSharedPtr<FJsonValue>& Value, FString& OutJson)
+    {
+        TArray<TSharedPtr<FJsonValue>> RootArray;
+        RootArray.Add(Value);
+        FString WrappedJson;
+        TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&WrappedJson);
+        const bool bSerialized = FJsonSerializer::Serialize(RootArray, Writer);
+        OutJson = bSerialized ? WrappedJson.Mid(1, WrappedJson.Len() - 2) : FString();
+        OutJson.TrimStartAndEndInline();
+        return bSerialized && !OutJson.IsEmpty();
+    }
+
 }
 
 URedwebSocketComponent::URedwebSocketComponent(const FObjectInitializer& ObjectInitializer)
@@ -199,13 +211,27 @@ void URedwebSocketComponent::SendHeartbeat()
 
 FString URedwebSocketComponent::BuildFullUrl() const
 {
+    const auto SplitQuery = [](FString& UrlPart, FString& OutQuery)
+    {
+        int32 QueryStart = INDEX_NONE;
+        if (UrlPart.FindChar(TEXT('?'), QueryStart))
+        {
+            OutQuery = UrlPart.Mid(QueryStart + 1);
+            UrlPart = UrlPart.Left(QueryStart);
+        }
+    };
+
     FString Base = ServerUrl;
+    FString BaseQuery;
+    SplitQuery(Base, BaseQuery);
     while (Base.EndsWith(TEXT("/")))
     {
         Base = Base.LeftChop(1);
     }
 
     FString Path = RoutePath;
+    FString PathQuery;
+    SplitQuery(Path, PathQuery);
     if (!Path.IsEmpty() && !Path.StartsWith(TEXT("/")))
     {
         Path = TEXT("/") + Path;
@@ -214,6 +240,23 @@ FString URedwebSocketComponent::BuildFullUrl() const
     FString Url = Base + Path;
 
     TArray<FString> Pairs;
+    const auto AddExistingPairs = [&Pairs](const FString& Query)
+    {
+        TArray<FString> ExistingPairs;
+        Query.ParseIntoArray(ExistingPairs, TEXT("&"), true);
+        for (const FString& Pair : ExistingPairs)
+        {
+            FString Key;
+            FString Value;
+            if (Pair.Split(TEXT("="), &Key, &Value) && Key == TEXT("redwebVersion"))
+            {
+                continue;
+            }
+            Pairs.Add(Pair);
+        }
+    };
+    AddExistingPairs(BaseQuery);
+    AddExistingPairs(PathQuery);
     Pairs.Add(FString::Printf(TEXT("redwebVersion=%s"), RedwebProtocolVersion));
     for (const FRedwebKeyValue& QueryParam : QueryParams)
     {
@@ -227,7 +270,11 @@ FString URedwebSocketComponent::BuildFullUrl() const
         }
     }
 
-    Url += TEXT("?") + FString::Join(Pairs, TEXT("&"));
+    if (Pairs.Num() > 0)
+    {
+        Url += TEXT("?");
+        Url += FString::Join(Pairs, TEXT("&"));
+    }
     return Url;
 }
 
@@ -626,9 +673,7 @@ bool URedwebSocketComponent::ExtractTypedPayload(const FString& InMessage, FStri
             return false;
         }
 
-        OutPayloadJson.Empty();
-        TSharedRef<TJsonWriter<>> PayloadWriter = TJsonWriterFactory<>::Create(&OutPayloadJson);
-        return FJsonSerializer::Serialize(*PayloadValue, FString(), PayloadWriter);
+        return SerializeJsonValue(*PayloadValue, OutPayloadJson);
     }
 
     if (!Obj->HasField(TEXT("type")))
