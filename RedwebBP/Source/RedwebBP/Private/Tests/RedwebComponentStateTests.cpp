@@ -115,6 +115,20 @@ bool FRedwebComponentStateAutomationTest::RunTest(const FString& Parameters)
                     return false;
                 }, 5.0));
 
+            const int32 ErrorsBeforeProtocolError = Receiver->Errors.Num();
+            TestTrue(TEXT("The component sends a command that receives a real protocol error"),
+                Component->SendRaw(TEXT("{\"type\":\"echo\",\"fixtureCommand\":\"error\"}")));
+            TestTrue(TEXT("A Redweb protocol error reaches the Blueprint error event"),
+                PumpGameThreadUntil([Receiver, ErrorsBeforeProtocolError]()
+                {
+                    return Receiver->Errors.Num() > ErrorsBeforeProtocolError;
+                }, 5.0));
+            if (Receiver->Errors.Num() > ErrorsBeforeProtocolError)
+            {
+                TestTrue(TEXT("The protocol error exposes its server code"), Receiver->Errors.Last().Contains(TEXT("FIXTURE_ERROR")));
+                TestTrue(TEXT("The protocol error exposes its safe server message"), Receiver->Errors.Last().Contains(TEXT("fixture-error")));
+            }
+
             const int32 DisconnectedBeforeRemoteClose = Receiver->DisconnectedCount;
             TestTrue(TEXT("The component sends a remote-close request through the real server"),
                 Component->SendRaw(TEXT("{\"type\":\"echo\",\"fixtureCommand\":\"close\"}")));
@@ -146,7 +160,7 @@ bool FRedwebComponentStateAutomationTest::RunTest(const FString& Parameters)
     Query.Value = TEXT("a&b");
     Component->QueryParams.Add(Query);
     TestEqual(TEXT("URL construction encodes query keys and values"), Component->BuildFullUrl(),
-        FString(TEXT("ws://example.test/room?room%20name=a%26b")));
+        FString(TEXT("ws://example.test/room?redwebVersion=1&room%20name=a%26b")));
     TestFalse(TEXT("The disconnected component reports no open socket"), Component->IsConnected());
     TestFalse(TEXT("Unframed JSON fails cleanly without a connected socket"), Component->SendJson(TEXT("{}"), FString()));
     TestFalse(TEXT("Valid typed JSON fails cleanly without a connected socket"), Component->SendJson(TEXT("{}"), TEXT("event")));

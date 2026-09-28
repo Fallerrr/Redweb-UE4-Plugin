@@ -32,11 +32,11 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
     UrlCases->ServerUrl = TEXT("ws://example.test///");
     UrlCases->RoutePath = TEXT("/socket");
     TestEqual(TEXT("A slash-terminated server URL does not create a duplicate route slash"),
-        UrlCases->BuildFullUrl(), FString(TEXT("ws://example.test/socket")));
+        UrlCases->BuildFullUrl(), FString(TEXT("ws://example.test/socket?redwebVersion=1")));
     FRedwebKeyValue EmptyOnlyQuery;
     UrlCases->QueryParams.Add(EmptyOnlyQuery);
     TestEqual(TEXT("Empty query keys do not append a question mark"),
-        UrlCases->BuildFullUrl(), FString(TEXT("ws://example.test/socket")));
+        UrlCases->BuildFullUrl(), FString(TEXT("ws://example.test/socket?redwebVersion=1")));
 
     const FString Url = FPlatformMisc::GetEnvironmentVariable(TEXT("REDWEBBP_TEST_URL")).IsEmpty()
         ? TEXT("ws://127.0.0.1:18182/socket")
@@ -51,11 +51,19 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
     Component->QueryParams.Add(Query);
     FRedwebKeyValue EmptyQuery;
     Component->QueryParams.Add(EmptyQuery);
+    FRedwebKeyValue UnsupportedVersionOverride;
+    UnsupportedVersionOverride.Key = TEXT("redwebVersion");
+    UnsupportedVersionOverride.Value = TEXT("2");
+    Component->QueryParams.Add(UnsupportedVersionOverride);
 
     const FString BuiltUrl = Component->BuildFullUrl();
     TestTrue(TEXT("The URL builder trims the base and adds the route slash"), BuiltUrl.Contains(TEXT("/socket?")));
+    TestTrue(TEXT("The URL builder negotiates the current Redweb protocol"), BuiltUrl.Contains(TEXT("redwebVersion=1")));
+    TestFalse(TEXT("The URL builder ignores an unsupported user version override"), BuiltUrl.Contains(TEXT("redwebVersion=2")));
     TestTrue(TEXT("The URL builder includes the non-empty query key"), BuiltUrl.Contains(TEXT("fixture=")));
     TestFalse(TEXT("The URL builder skips query entries with empty keys"), BuiltUrl.Contains(TEXT("&=")));
+    TestTrue(TEXT("Custom query parameters follow the protocol negotiation query"),
+        BuiltUrl.Contains(TEXT("?redwebVersion=1&fixture=")));
 
     const TPair<FRedwebNativeSocket::EAutomationFailurePoint, FString> CreationFailures[] =
     {
@@ -208,7 +216,8 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("IsConnected is true after the handshake"), Component->IsConnected());
 
         const auto CheckNextEcho = [this, Component, MessageEvent, &ResultLock, &ReceivedMessages](
-            const FString& Label, const FString& ExpectedField, const FString& ExpectedValue)
+            const FString& Label, const FString& ExpectedField, const FString& ExpectedValue,
+            const FString& ExpectedRequestId = FString())
         {
             const bool bReceived = MessageEvent->Wait(5000);
             TestTrue(*Label, bReceived);
@@ -220,8 +229,18 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
             TestTrue(TEXT("The fixture response is a JSON object"), FJsonSerializer::Deserialize(Reader, Object) && Object.IsValid());
             if (Object.IsValid())
             {
+                TestEqual(TEXT("The fixture uses Redweb protocol version 1"), Object->GetStringField(TEXT("v")), FString(TEXT("1")));
                 TestEqual(TEXT("The fixture identifies its echo response"), Object->GetStringField(TEXT("type")), FString(TEXT("echo")));
-                TestEqual(TEXT("The expected legacy payload field is echoed"), Object->GetStringField(ExpectedField), ExpectedValue);
+                const TSharedPtr<FJsonObject>* Payload = nullptr;
+                TestTrue(TEXT("The Redweb envelope carries a JSON object payload"), Object->TryGetObjectField(TEXT("payload"), Payload) && Payload && Payload->IsValid());
+                if (Payload && Payload->IsValid())
+                {
+                    TestEqual(TEXT("The expected application payload field is echoed"), (*Payload)->GetStringField(ExpectedField), ExpectedValue);
+                }
+                if (!ExpectedRequestId.IsEmpty())
+                {
+                    TestEqual(TEXT("The server preserves protocol request IDs"), Object->GetStringField(TEXT("requestId")), ExpectedRequestId);
+                }
             }
         };
 
@@ -248,6 +267,10 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("SendRaw sends a connected client's frame"),
             Component->SendRaw(TEXT("{\"type\":\"echo\",\"text\":\"raw-send\"}")));
         CheckNextEcho(TEXT("The Redweb server echoes SendRaw"), TEXT("text"), TEXT("raw-send"));
+
+        TestTrue(TEXT("SendRaw preserves an already versioned Redweb envelope"),
+            Component->SendRaw(TEXT("{\"v\":\"1\",\"type\":\"echo\",\"requestId\":\"raw-v1\",\"payload\":{\"text\":\"raw-v1\"}}")));
+        CheckNextEcho(TEXT("The server replies to a raw protocol v1 envelope"), TEXT("text"), TEXT("raw-v1"), TEXT("raw-v1"));
 
         FString LargeText;
         LargeText.Reserve(128 * 1024);
@@ -304,12 +327,12 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
     CurrentCallbacks.OnConnected = [CurrentConnectedEvent]() { CurrentConnectedEvent->Trigger(); };
     FRedwebNativeSocket CurrentProtocolSocket(CurrentUrl, MoveTemp(CurrentCallbacks));
     const bool bCurrentProtocolStarted = CurrentProtocolSocket.Start();
-    TestTrue(TEXT("The legacy transport test starts against the current protocol route"), bCurrentProtocolStarted);
+    TestTrue(TEXT("A missing-version negotiation test starts its native transport worker"), bCurrentProtocolStarted);
     if (bCurrentProtocolStarted)
     {
         const bool bCurrentProtocolRejected = CurrentErrorEvent->Wait(5000);
-        TestTrue(TEXT("Current Redweb rejects the legacy handshake without version negotiation"), bCurrentProtocolRejected);
-        TestFalse(TEXT("The legacy transport does not accidentally connect to the versioned route"),
+        TestTrue(TEXT("Redweb rejects the handshake when the version query is missing"), bCurrentProtocolRejected);
+        TestFalse(TEXT("An unnegotiated transport cannot connect to a versioned route"),
             CurrentConnectedEvent->Wait(100));
         CurrentProtocolSocket.Shutdown();
     }
@@ -457,7 +480,7 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
         if (bAbruptSocketConnected)
         {
             TestTrue(TEXT("The native transport sends before the peer aborts"),
-                AbruptSocket->Send(TEXT("{\"type\":\"echo\",\"fixtureCommand\":\"abort\"}")));
+                AbruptSocket->Send(TEXT("{\"v\":\"1\",\"type\":\"echo\",\"payload\":{\"fixtureCommand\":\"abort\"}}")));
             const bool bAbruptErrorReported = AbruptErrorEvent->Wait(5000);
             const bool bAbruptCloseReported = AbruptClosedEvent->Wait(5000);
             TestTrue(TEXT("The native receive failure is reported"), bAbruptErrorReported);

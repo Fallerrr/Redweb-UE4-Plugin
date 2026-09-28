@@ -139,5 +139,6 @@ private:
     void DispatchRawAndTypedMessage(const FString& Message);
 
     static bool ExtractTypedPayload(const FString& InMessage, FString& OutType, FString& OutPayloadJson);
+    static FString UpgradeLegacyMessage(const FString& Message);
     static FString BuildJsonFromFields(const FString& Type, const TArray<FRedwebKeyValue>& Fields);
 };

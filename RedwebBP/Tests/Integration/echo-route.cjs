@@ -1,48 +1,50 @@
 'use strict';
 
-const { BaseHandler, SocketRoute } = require('redweb');
+const { SocketRoute } = require('redweb');
 const { defineSocketContract } = require('redweb/contract');
 const { z } = require('zod');
 
-class EchoHandler extends BaseHandler {
-  constructor() { super('echo'); }
-  onMessage(socket, message) {
-    if (message.fixtureCommand === 'binary') {
+const protocol = defineSocketContract('1', {
+  echo: z.object({
+    text: z.string().optional(),
+    data: z.string().optional(),
+    fixtureCommand: z.string().optional(),
+  }).strict(),
+});
+
+const EchoHandler = protocol.handler('echo', (socket, payload, message) => {
+    if (payload.fixtureCommand === 'binary') {
       socket.send(Buffer.from([0xde, 0xad, 0xbe, 0xef]), { binary: true });
       return;
     }
-    if (message.fixtureCommand === 'close') {
+    if (payload.fixtureCommand === 'close') {
       socket.close(4001, 'fixture-close');
       return;
     }
-    if (message.fixtureCommand === 'empty') {
+    if (payload.fixtureCommand === 'empty') {
       socket.send('');
       return;
     }
-    if (message.fixtureCommand === 'abort') {
+    if (payload.fixtureCommand === 'abort') {
       socket.terminate();
       return;
     }
-    socket.sendJson({ type: 'echo', text: message.text, data: message.data });
-  }
-}
+    if (payload.fixtureCommand === 'error') {
+      socket.sendProtocolError('FIXTURE_ERROR', 'fixture-error', { requestId: message.requestId });
+      return;
+    }
+    return protocol.send(socket, 'echo', { text: payload.text, data: payload.data }, { requestId: message.requestId });
+});
 
 class EchoRoute extends SocketRoute {
   constructor() {
-    super({ path: '/socket', handlers: [EchoHandler], allowDuplicateConnections: true });
+    super({ path: '/socket', handlers: [EchoHandler], protocol: protocol.protocol, allowDuplicateConnections: true });
   }
 }
 
-const protocol = defineSocketContract('1', {
-  echo: z.object({ text: z.string() }).strict(),
-});
-const VersionedEcho = protocol.handler('echo', (socket, payload, message) =>
-  protocol.send(socket, 'echo', payload, { requestId: message.requestId }),
-);
-
 class VersionedEchoRoute extends SocketRoute {
   constructor() {
-    super({ path: '/current', handlers: [VersionedEcho], protocol: protocol.protocol });
+    super({ path: '/current', handlers: [EchoHandler], protocol: protocol.protocol });
   }
 }
 

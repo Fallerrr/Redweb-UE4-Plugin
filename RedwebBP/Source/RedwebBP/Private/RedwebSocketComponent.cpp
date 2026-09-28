@@ -17,6 +17,29 @@ DEFINE_LOG_CATEGORY_STATIC(LogRedwebBP, VeryVerbose, VeryVerbose);
 DEFINE_LOG_CATEGORY_STATIC(LogRedwebBP, Log, VeryVerbose);
 #endif
 
+namespace
+{
+    constexpr TCHAR RedwebProtocolVersion[] = TEXT("1");
+
+    FString SerializeObject(const TSharedRef<FJsonObject>& Object)
+    {
+        FString Json;
+        TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Json);
+        FJsonSerializer::Serialize(Object, Writer);
+        return Json;
+    }
+
+    FString BuildProtocolEnvelope(const FString& Type, const TSharedRef<FJsonObject>& Payload)
+    {
+        TSharedRef<FJsonObject> Envelope = MakeShared<FJsonObject>();
+        Envelope->SetStringField(TEXT("v"), RedwebProtocolVersion);
+        Envelope->SetStringField(TEXT("type"), Type);
+        Envelope->SetObjectField(TEXT("payload"), Payload);
+        return SerializeObject(Envelope);
+    }
+
+}
+
 URedwebSocketComponent::URedwebSocketComponent(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
     , ServerUrl(TEXT("ws://127.0.0.1:3000"))
@@ -95,7 +118,42 @@ bool URedwebSocketComponent::SendRaw(const FString& Message)
         return false;
     }
 
-    return Socket->Send(Message);
+    return Socket->Send(UpgradeLegacyMessage(Message));
+}
+
+FString URedwebSocketComponent::UpgradeLegacyMessage(const FString& Message)
+{
+    TSharedPtr<FJsonObject> Object;
+    const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Message);
+    if (!FJsonSerializer::Deserialize(Reader, Object) || !Object.IsValid())
+    {
+        return Message;
+    }
+
+    FString ExistingVersion;
+    FString Type;
+    if (Object->TryGetStringField(TEXT("v"), ExistingVersion) && Object->TryGetStringField(TEXT("type"), Type) &&
+        (Object->HasField(TEXT("payload")) || (Type == TEXT("error") && Object->HasField(TEXT("error")))) &&
+        !ExistingVersion.IsEmpty() && !Type.IsEmpty())
+    {
+        return Message;
+    }
+
+    if (!Object->TryGetStringField(TEXT("type"), Type) || Type.IsEmpty())
+    {
+        return Message;
+    }
+
+    TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Object->Values)
+    {
+        if (Field.Key != TEXT("type"))
+        {
+            Payload->SetField(Field.Key, Field.Value);
+        }
+    }
+
+    return BuildProtocolEnvelope(Type, Payload);
 }
 
 bool URedwebSocketComponent::SendJson(const FString& JsonPayload, const FString& Type)
@@ -155,27 +213,21 @@ FString URedwebSocketComponent::BuildFullUrl() const
 
     FString Url = Base + Path;
 
-    if (QueryParams.Num() > 0)
+    TArray<FString> Pairs;
+    Pairs.Add(FString::Printf(TEXT("redwebVersion=%s"), RedwebProtocolVersion));
+    for (const FRedwebKeyValue& QueryParam : QueryParams)
     {
-        TArray<FString> Pairs;
-        for (const FRedwebKeyValue& QueryParam : QueryParams)
+        if (!QueryParam.Key.IsEmpty() && QueryParam.Key != TEXT("redwebVersion"))
         {
-            if (!QueryParam.Key.IsEmpty())
-            {
-                Pairs.Add(
-                    FGenericPlatformHttp::UrlEncode(QueryParam.Key) +
-                    TEXT("=") +
-                    FGenericPlatformHttp::UrlEncode(QueryParam.Value)
-                );
-            }
-        }
-
-        if (Pairs.Num() > 0)
-        {
-            Url += TEXT("?") + FString::Join(Pairs, TEXT("&"));
+            Pairs.Add(
+                FGenericPlatformHttp::UrlEncode(QueryParam.Key) +
+                TEXT("=") +
+                FGenericPlatformHttp::UrlEncode(QueryParam.Value)
+            );
         }
     }
 
+    Url += TEXT("?") + FString::Join(Pairs, TEXT("&"));
     return Url;
 }
 
@@ -451,7 +503,15 @@ void URedwebSocketComponent::DispatchRawAndTypedMessage(const FString& Message)
     if (FJsonSerializer::Deserialize(Reader, MessageObject) && MessageObject.IsValid())
     {
         MessageObject->TryGetStringField(TEXT("type"), MessageTypeForLog);
-        MessageObject->TryGetNumberField(TEXT("timestamp"), ServerTimestampMs);
+        const TSharedPtr<FJsonValue>* PayloadValue = MessageObject->Values.Find(TEXT("payload"));
+        if (PayloadValue && PayloadValue->IsValid() && (*PayloadValue)->Type == EJson::Object)
+        {
+            (*PayloadValue)->AsObject()->TryGetNumberField(TEXT("timestamp"), ServerTimestampMs);
+        }
+        else
+        {
+            MessageObject->TryGetNumberField(TEXT("timestamp"), ServerTimestampMs);
+        }
     }
 
     if (bLogReceivedMessages)
@@ -497,14 +557,34 @@ void URedwebSocketComponent::DispatchRawAndTypedMessage(const FString& Message)
         OnRawMessage.Broadcast(Message);
     }
 
-    if (OnTypedMessage.IsBound() && MessageObject.IsValid() && MessageObject->HasField(TEXT("type")))
+    FString Type;
+    FString PayloadJson;
+    if (!ExtractTypedPayload(Message, Type, PayloadJson))
     {
-        const FString Type = MessageObject->GetStringField(TEXT("type"));
-        MessageObject->RemoveField(TEXT("type"));
+        return;
+    }
 
-        FString PayloadJson;
-        TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&PayloadJson);
-        FJsonSerializer::Serialize(MessageObject.ToSharedRef(), Writer);
+    if (Type == TEXT("error"))
+    {
+        FString ErrorCode;
+        FString ErrorMessage = TEXT("Redweb reported a protocol error.");
+        TSharedPtr<FJsonObject> ErrorObject;
+        const TSharedRef<TJsonReader<>> ErrorReader = TJsonReaderFactory<>::Create(PayloadJson);
+        if (FJsonSerializer::Deserialize(ErrorReader, ErrorObject) && ErrorObject.IsValid())
+        {
+            ErrorObject->TryGetStringField(TEXT("code"), ErrorCode);
+            ErrorObject->TryGetStringField(TEXT("message"), ErrorMessage);
+        }
+        const FString Detail = ErrorCode.IsEmpty()
+            ? ErrorMessage
+            : FString::Printf(TEXT("Redweb protocol error [%s]: %s"), *ErrorCode, *ErrorMessage);
+        UE_LOG(LogRedwebBP, Warning, TEXT("%s"), *Detail);
+        OnError.Broadcast(Detail);
+        return;
+    }
+
+    if (OnTypedMessage.IsBound())
+    {
         OnTypedMessage.Broadcast(Type, PayloadJson);
     }
 }
@@ -519,6 +599,36 @@ bool URedwebSocketComponent::ExtractTypedPayload(const FString& InMessage, FStri
     if (!FJsonSerializer::Deserialize(Reader, Obj) || !Obj.IsValid())
     {
         return false;
+    }
+
+    FString Version;
+    if (Obj->TryGetStringField(TEXT("v"), Version))
+    {
+        if (Version != RedwebProtocolVersion || !Obj->TryGetStringField(TEXT("type"), OutType) || OutType.IsEmpty())
+        {
+            return false;
+        }
+
+        if (OutType == TEXT("error"))
+        {
+            const TSharedPtr<FJsonObject>* ErrorObject = nullptr;
+            if (!Obj->TryGetObjectField(TEXT("error"), ErrorObject) || !ErrorObject || !ErrorObject->IsValid())
+            {
+                return false;
+            }
+            OutPayloadJson = SerializeObject(ErrorObject->ToSharedRef());
+            return true;
+        }
+
+        const TSharedPtr<FJsonValue>* PayloadValue = Obj->Values.Find(TEXT("payload"));
+        if (!PayloadValue || !PayloadValue->IsValid())
+        {
+            return false;
+        }
+
+        OutPayloadJson.Empty();
+        TSharedRef<TJsonWriter<>> PayloadWriter = TJsonWriterFactory<>::Create(&OutPayloadJson);
+        return FJsonSerializer::Serialize(*PayloadValue, FString(), PayloadWriter);
     }
 
     if (!Obj->HasField(TEXT("type")))

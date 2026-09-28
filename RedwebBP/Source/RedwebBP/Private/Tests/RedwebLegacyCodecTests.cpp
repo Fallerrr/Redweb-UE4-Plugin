@@ -14,6 +14,17 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FRedwebLegacyCodecAutomationTest::RunTest(const FString& Parameters)
 {
+    TestEqual(TEXT("Invalid raw data remains untouched for server-side diagnostics"),
+        URedwebSocketComponent::UpgradeLegacyMessage(TEXT("not-json")), FString(TEXT("not-json")));
+    TestEqual(TEXT("JSON without a message type remains untouched"),
+        URedwebSocketComponent::UpgradeLegacyMessage(TEXT("{\"value\":1}")), FString(TEXT("{\"value\":1}")));
+    const FString CurrentEnvelope = TEXT("{\"v\":\"1\",\"type\":\"move\",\"payload\":{\"cell\":3}}");
+    TestEqual(TEXT("A current protocol envelope is not rewritten"),
+        URedwebSocketComponent::UpgradeLegacyMessage(CurrentEnvelope), CurrentEnvelope);
+    const FString ProtocolErrorEnvelope = TEXT("{\"v\":\"1\",\"type\":\"error\",\"error\":{\"code\":\"DENIED\",\"message\":\"denied\"}}");
+    TestEqual(TEXT("A current protocol error envelope is not rewritten"),
+        URedwebSocketComponent::UpgradeLegacyMessage(ProtocolErrorEnvelope), ProtocolErrorEnvelope);
+
     FString Type;
     FString Payload;
 
@@ -69,6 +80,39 @@ bool FRedwebLegacyCodecAutomationTest::RunTest(const FString& Parameters)
         TestEqual(TEXT("String values survive JSON escaping"), TypedObject->GetStringField(TEXT("text")), TextField.Value);
         TestFalse(TEXT("Fields with an empty key are omitted"), TypedObject->HasField(TEXT("")));
     }
+
+    TestTrue(TEXT("A protocol v1 envelope is recognized"), URedwebSocketComponent::ExtractTypedPayload(
+        TEXT("{\"v\":\"1\",\"type\":\"move\",\"payload\":{\"cell\":3}}"), Type, Payload));
+    TestEqual(TEXT("The envelope type is exposed to typed listeners"), Type, FString(TEXT("move")));
+    TSharedPtr<FJsonObject> VersionedPayloadObject;
+    const TSharedRef<TJsonReader<>> VersionedPayloadReader = TJsonReaderFactory<>::Create(Payload);
+    TestTrue(TEXT("Typed listeners receive the envelope payload without protocol fields"),
+        FJsonSerializer::Deserialize(VersionedPayloadReader, VersionedPayloadObject) && VersionedPayloadObject.IsValid());
+    if (VersionedPayloadObject.IsValid())
+    {
+        TestEqual(TEXT("The protocol payload keeps its application fields"), VersionedPayloadObject->GetIntegerField(TEXT("cell")), 3);
+        TestFalse(TEXT("The protocol envelope version is not leaked into the payload"), VersionedPayloadObject->HasField(TEXT("v")));
+    }
+
+    TestTrue(TEXT("Protocol errors are decoded as typed Redweb errors"), URedwebSocketComponent::ExtractTypedPayload(
+        TEXT("{\"v\":\"1\",\"type\":\"error\",\"error\":{\"code\":\"UNKNOWN_HANDLER\",\"message\":\"Unknown handler\"}}"),
+        Type, Payload));
+    TestEqual(TEXT("The protocol error type is preserved"), Type, FString(TEXT("error")));
+    TSharedPtr<FJsonObject> ErrorPayloadObject;
+    const TSharedRef<TJsonReader<>> ErrorPayloadReader = TJsonReaderFactory<>::Create(Payload);
+    TestTrue(TEXT("The protocol error details are converted to JSON"),
+        FJsonSerializer::Deserialize(ErrorPayloadReader, ErrorPayloadObject) && ErrorPayloadObject.IsValid());
+    if (ErrorPayloadObject.IsValid())
+    {
+        TestEqual(TEXT("The protocol error code survives decoding"), ErrorPayloadObject->GetStringField(TEXT("code")), FString(TEXT("UNKNOWN_HANDLER")));
+    }
+
+    TestFalse(TEXT("Unknown protocol versions are rejected by the typed decoder"), URedwebSocketComponent::ExtractTypedPayload(
+        TEXT("{\"v\":\"2\",\"type\":\"move\",\"payload\":{}}"), Type, Payload));
+    TestFalse(TEXT("Malformed protocol errors without error details are rejected"), URedwebSocketComponent::ExtractTypedPayload(
+        TEXT("{\"v\":\"1\",\"type\":\"error\"}"), Type, Payload));
+    TestFalse(TEXT("Protocol messages without payloads are rejected"), URedwebSocketComponent::ExtractTypedPayload(
+        TEXT("{\"v\":\"1\",\"type\":\"move\"}"), Type, Payload));
 
     return true;
 }
