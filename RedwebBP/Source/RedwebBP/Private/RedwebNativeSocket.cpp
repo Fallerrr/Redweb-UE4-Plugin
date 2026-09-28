@@ -10,6 +10,10 @@
 #include "Windows/HideWindowsPlatformTypes.h"
 #endif
 
+#if WITH_DEV_AUTOMATION_TESTS
+bool FRedwebNativeSocket::bFailNextThreadCreationForAutomation = false;
+#endif
+
 namespace
 {
 #if PLATFORM_WINDOWS
@@ -46,7 +50,6 @@ FRedwebNativeSocket::FRedwebNativeSocket(const FString& InUrl, FCallbacks&& InCa
     , Thread(nullptr)
     , SessionHandle(nullptr)
     , ConnectionHandle(nullptr)
-    , RequestHandle(nullptr)
     , WebSocketHandle(nullptr)
     , bStopRequested(false)
     , bConnected(false)
@@ -65,6 +68,14 @@ bool FRedwebNativeSocket::Start()
     {
         return false;
     }
+
+#if WITH_DEV_AUTOMATION_TESTS
+    if (bFailNextThreadCreationForAutomation)
+    {
+        bFailNextThreadCreationForAutomation = false;
+        return false;
+    }
+#endif
 
     Thread = FRunnableThread::Create(this, TEXT("RedwebNativeSocket"), 0, TPri_AboveNormal);
     return Thread != nullptr;
@@ -224,8 +235,20 @@ bool FRedwebNativeSocket::ConnectSocket(FString& OutError)
         Path += FString(Components.dwExtraInfoLength, Components.lpszExtraInfo);
     }
 
+#if WITH_DEV_AUTOMATION_TESTS
+    const EAutomationFailurePoint FailurePoint = AutomationFailurePoint;
+    AutomationFailurePoint = EAutomationFailurePoint::None;
+#endif
+
     HINTERNET NewSession = WinHttpOpen(TEXT("Gemhouse-RedwebBP/3.0"), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+#if WITH_DEV_AUTOMATION_TESTS
+    if (FailurePoint == EAutomationFailurePoint::SessionCreation && NewSession)
+    {
+        WinHttpCloseHandle(NewSession);
+        NewSession = nullptr;
+    }
+#endif
     if (!NewSession)
     {
         OutError = FString::Printf(TEXT("Could not open the Windows WebSocket session: %s"), *DescribeWindowsError(GetLastError()));
@@ -236,6 +259,13 @@ bool FRedwebNativeSocket::ConnectSocket(FString& OutError)
     WinHttpSetTimeouts(NewSession, 5000, 5000, 10000, 10000);
 
     HINTERNET NewConnection = WinHttpConnect(NewSession, *Host, Components.nPort, 0);
+#if WITH_DEV_AUTOMATION_TESTS
+    if (FailurePoint == EAutomationFailurePoint::ConnectionCreation && NewConnection)
+    {
+        WinHttpCloseHandle(NewConnection);
+        NewConnection = nullptr;
+    }
+#endif
     if (!NewConnection)
     {
         const FString Failure = DescribeWindowsError(GetLastError());
@@ -246,6 +276,13 @@ bool FRedwebNativeSocket::ConnectSocket(FString& OutError)
 
     HINTERNET NewRequest = WinHttpOpenRequest(NewConnection, TEXT("GET"), *Path, nullptr,
         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, bSecure ? WINHTTP_FLAG_SECURE : 0);
+#if WITH_DEV_AUTOMATION_TESTS
+    if (FailurePoint == EAutomationFailurePoint::RequestCreation && NewRequest)
+    {
+        WinHttpCloseHandle(NewRequest);
+        NewRequest = nullptr;
+    }
+#endif
     if (!NewRequest)
     {
         const FString Failure = DescribeWindowsError(GetLastError());
@@ -291,7 +328,6 @@ bool FRedwebNativeSocket::ConnectSocket(FString& OutError)
 
         SessionHandle = NewSession;
         ConnectionHandle = NewConnection;
-        RequestHandle = nullptr;
         WebSocketHandle = NewWebSocket;
     }
 
@@ -387,11 +423,6 @@ void FRedwebNativeSocket::CloseHandles()
     {
         WinHttpCloseHandle(static_cast<HINTERNET>(WebSocketHandle));
         WebSocketHandle = nullptr;
-    }
-    if (RequestHandle)
-    {
-        WinHttpCloseHandle(static_cast<HINTERNET>(RequestHandle));
-        RequestHandle = nullptr;
     }
     if (ConnectionHandle)
     {

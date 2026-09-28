@@ -110,6 +110,7 @@ private:
 #if WITH_DEV_AUTOMATION_TESTS
     friend class FRedwebLegacyCodecAutomationTest;
     friend class FRedwebNativeTransportIntegrationTest;
+    friend class FRedwebComponentStateAutomationTest;
 #endif
 
     TSharedPtr<FRedwebNativeSocket, ESPMode::ThreadSafe> Socket;

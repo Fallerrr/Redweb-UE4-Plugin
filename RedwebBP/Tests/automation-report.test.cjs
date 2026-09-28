@@ -58,9 +58,11 @@ test('the report command validates real JSON files and exits nonzero on missing 
   const root = mkdtempSync(path.join(os.tmpdir(), 'redwebbp-automation-report-'));
   const script = path.resolve(__dirname, 'verify-automation-report.cjs');
   const validPath = path.join(root, 'valid.json');
+  const bomPath = path.join(root, 'bom.json');
   const malformedPath = path.join(root, 'malformed.json');
   const invalidPath = path.join(root, 'invalid.json');
   writeFileSync(validPath, JSON.stringify(successfulReport()));
+  writeFileSync(bomPath, `\uFEFF${JSON.stringify(successfulReport())}`);
   writeFileSync(malformedPath, '{');
   writeFileSync(invalidPath, JSON.stringify({ tests: [] }));
 
@@ -68,6 +70,10 @@ test('the report command validates real JSON files and exits nonzero on missing 
     const valid = spawnSync(process.execPath, [script, validPath], { encoding: 'utf8' });
     assert.equal(valid.status, 0, valid.stderr);
     assert.match(valid.stdout, /2\/2 tests passed/);
+
+    const bom = spawnSync(process.execPath, [script, bomPath], { encoding: 'utf8' });
+    assert.equal(bom.status, 0, bom.stderr);
+    assert.match(bom.stdout, /2\/2 tests passed/);
 
     const missingArgument = spawnSync(process.execPath, [script], { encoding: 'utf8' });
     assert.equal(missingArgument.status, 1);

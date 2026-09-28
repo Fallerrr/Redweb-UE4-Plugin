@@ -34,6 +34,21 @@ public:
     virtual void Exit() override;
 
 private:
+#if WITH_DEV_AUTOMATION_TESTS
+    friend class FRedwebNativeTransportIntegrationTest;
+
+    enum class EAutomationFailurePoint
+    {
+        None,
+        SessionCreation,
+        ConnectionCreation,
+        RequestCreation
+    };
+
+    EAutomationFailurePoint AutomationFailurePoint = EAutomationFailurePoint::None;
+    static bool bFailNextThreadCreationForAutomation;
+#endif
+
     bool ConnectSocket(FString& OutError);
     void ReceiveLoop();
     void CloseHandles();
@@ -47,7 +62,6 @@ private:
     FCriticalSection SendLock;
     void* SessionHandle;
     void* ConnectionHandle;
-    void* RequestHandle;
     void* WebSocketHandle;
     FThreadSafeBool bStopRequested;
     FThreadSafeBool bConnected;

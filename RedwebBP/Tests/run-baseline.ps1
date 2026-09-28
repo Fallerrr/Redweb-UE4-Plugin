@@ -12,10 +12,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not install the pinned Redweb integratio
 & (Join-Path $integration 'node_modules\.bin\c8.cmd') `
     --include=Tests/lib/automationReport.cjs `
     --include=Tests/verify-automation-report.cjs `
+    --include=Tests/lib/nativeCoverage.cjs `
+    --include=Tests/verify-native-coverage.cjs `
     --temp-directory=Tests/Integration/.nyc_output `
     --report-dir=Tests/Integration/coverage/automation-report `
     --check-coverage --lines=100 --branches=100 --functions=100 --statements=100 `
-    node --test Tests/automation-report.test.cjs
+    node --test Tests/automation-report.test.cjs Tests/native-coverage.test.cjs
 if ($LASTEXITCODE -ne 0) { throw 'The Unreal automation report gate failed.' }
 
 Push-Location $integration
@@ -71,13 +73,20 @@ try {
         '-unattended', '-nop4', '-nosplash', '-NullRHI',
         '-ExecCmds="Automation RunTests RedwebBP; Quit"',
         '-testexit="Automation Test Queue Empty"',
-        "-ReportOutputPath=$reportRoot",
+        "-ReportExportPath=$reportRoot",
         "-abslog=$editorLog"
     )
     $editor = Start-Process -FilePath $UnrealEditorCmd -ArgumentList $arguments -Wait -PassThru
     if ($editor.ExitCode -ne 0) {
         $log = if (Test-Path -LiteralPath $editorLog) { Get-Content -Raw $editorLog } else { '<Unreal produced no log>' }
         throw "Unreal automation failed with exit code $($editor.ExitCode):`n$log"
+    }
+
+    if (Test-Path -LiteralPath $editorLog) {
+        $log = Get-Content -Raw $editorLog
+        if ($log -match 'LogPluginManager: Mounting plugin SteamVR|LogModuleManager: Loaded Module: SteamVR') {
+            throw 'The headless plugin test host unexpectedly loaded SteamVR.'
+        }
     }
 
     node (Join-Path $PSScriptRoot 'verify-automation-report.cjs') $automationReport

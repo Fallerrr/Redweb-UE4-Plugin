@@ -11,6 +11,12 @@
 #include "Serialization/JsonWriter.h"
 #include "TimerManager.h"
 
+#if REDWEBBP_NATIVE_COVERAGE
+DEFINE_LOG_CATEGORY_STATIC(LogRedwebBP, VeryVerbose, VeryVerbose);
+#else
+DEFINE_LOG_CATEGORY_STATIC(LogRedwebBP, Log, VeryVerbose);
+#endif
+
 URedwebSocketComponent::URedwebSocketComponent(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
     , ServerUrl(TEXT("ws://127.0.0.1:3000"))
@@ -85,7 +91,7 @@ bool URedwebSocketComponent::SendRaw(const FString& Message)
 {
     if (!Socket.IsValid() || !Socket->IsConnected())
     {
-        UE_LOG(LogTemp, Warning, TEXT("Redweb send failed because socket is not connected."));
+        UE_LOG(LogRedwebBP, Warning, TEXT("Redweb send failed because socket is not connected."));
         return false;
     }
 
@@ -184,12 +190,12 @@ void URedwebSocketComponent::StartSocket()
         !FullUrl.StartsWith(TEXT("wss://"), ESearchCase::IgnoreCase))
     {
         const FString Error = FString::Printf(TEXT("WebSocket URL must begin with ws:// or wss://: %s"), *FullUrl);
-        UE_LOG(LogTemp, Error, TEXT("%s"), *Error);
+        UE_LOG(LogRedwebBP, Error, TEXT("%s"), *Error);
         OnError.Broadcast(Error);
         return;
     }
 
-    UE_LOG(LogTemp, Log, TEXT("Redweb connecting: %s"), *FullUrl);
+    UE_LOG(LogRedwebBP, Log, TEXT("Redweb connecting: %s"), *FullUrl);
 
     const TWeakObjectPtr<URedwebSocketComponent> WeakThis(this);
     FRedwebNativeSocket::FCallbacks Callbacks;
@@ -241,7 +247,7 @@ void URedwebSocketComponent::StartSocket()
     if (!Socket->Start())
     {
         const FString Error = FString::Printf(TEXT("Could not start the native WebSocket worker for %s"), *FullUrl);
-        UE_LOG(LogTemp, Error, TEXT("%s"), *Error);
+        UE_LOG(LogRedwebBP, Error, TEXT("%s"), *Error);
         Socket.Reset();
         OnError.Broadcast(Error);
         ScheduleReconnect();
@@ -344,7 +350,7 @@ void URedwebSocketComponent::HandleConnectionTimeout()
             *BuildFullUrl()
         );
 
-        UE_LOG(LogTemp, Error, TEXT("%s"), *Error);
+        UE_LOG(LogRedwebBP, Error, TEXT("%s"), *Error);
         OnError.Broadcast(Error);
         StopSocket();
         ScheduleReconnect();
@@ -354,7 +360,7 @@ void URedwebSocketComponent::HandleConnectionTimeout()
 void URedwebSocketComponent::HandleSocketConnected()
 {
     StopConnectionTimeout();
-    UE_LOG(LogTemp, Log, TEXT("Redweb connected: %s"), *BuildFullUrl());
+    UE_LOG(LogRedwebBP, Log, TEXT("Redweb connected: %s"), *BuildFullUrl());
     OnConnected.Broadcast();
     StartHeartbeat();
 }
@@ -370,7 +376,7 @@ void URedwebSocketComponent::HandleSocketConnectionError(const FString& Error)
         Error.IsEmpty() ? TEXT("Unknown connection error") : *Error
     );
 
-    UE_LOG(LogTemp, Error, TEXT("%s"), *DetailedError);
+    UE_LOG(LogRedwebBP, Error, TEXT("%s"), *DetailedError);
     OnError.Broadcast(DetailedError);
 }
 
@@ -380,7 +386,7 @@ void URedwebSocketComponent::HandleSocketClosed(int32 StatusCode, const FString&
     StopHeartbeat();
 
     UE_LOG(
-        LogTemp,
+        LogRedwebBP,
         Warning,
         TEXT("Redweb closed: code=%d clean=%s reason=%s"),
         StatusCode,
@@ -457,7 +463,7 @@ void URedwebSocketComponent::DispatchRawAndTypedMessage(const FString& Message)
             if (bLogReceivedPayloads)
             {
                 UE_LOG(
-                    LogTemp,
+                    LogRedwebBP,
                     Log,
                     TEXT("Redweb received type=%s server_to_client_latency=%.0fms payload=%s"),
                     *MessageTypeForLog,
@@ -468,7 +474,7 @@ void URedwebSocketComponent::DispatchRawAndTypedMessage(const FString& Message)
             else
             {
                 UE_LOG(
-                    LogTemp,
+                    LogRedwebBP,
                     Verbose,
                     TEXT("Redweb received type=%s server_to_client_latency=%.0fms"),
                     *MessageTypeForLog,
@@ -478,11 +484,11 @@ void URedwebSocketComponent::DispatchRawAndTypedMessage(const FString& Message)
         }
         else if (bLogReceivedPayloads)
         {
-            UE_LOG(LogTemp, Log, TEXT("Redweb received type=%s payload=%s"), *MessageTypeForLog, *Message);
+            UE_LOG(LogRedwebBP, Log, TEXT("Redweb received type=%s payload=%s"), *MessageTypeForLog, *Message);
         }
         else
         {
-            UE_LOG(LogTemp, Verbose, TEXT("Redweb received type=%s"), *MessageTypeForLog);
+            UE_LOG(LogRedwebBP, Verbose, TEXT("Redweb received type=%s"), *MessageTypeForLog);
         }
     }
 

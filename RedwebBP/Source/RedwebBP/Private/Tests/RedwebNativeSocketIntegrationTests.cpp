@@ -2,6 +2,7 @@
 
 #include "RedwebNativeSocket.h"
 #include "RedwebSocketComponent.h"
+#include "RedwebAutomationEventReceiver.h"
 
 #include "HAL/Event.h"
 #include "HAL/PlatformMisc.h"
@@ -11,6 +12,13 @@
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+
+#if PLATFORM_WINDOWS
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <windows.h>
+#include <winhttp.h>
+#include "Windows/HideWindowsPlatformTypes.h"
+#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FRedwebNativeTransportIntegrationTest,
@@ -48,6 +56,95 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("The URL builder trims the base and adds the route slash"), BuiltUrl.Contains(TEXT("/socket?")));
     TestTrue(TEXT("The URL builder includes the non-empty query key"), BuiltUrl.Contains(TEXT("fixture=")));
     TestFalse(TEXT("The URL builder skips query entries with empty keys"), BuiltUrl.Contains(TEXT("&=")));
+
+    const TPair<FRedwebNativeSocket::EAutomationFailurePoint, FString> CreationFailures[] =
+    {
+        TPair<FRedwebNativeSocket::EAutomationFailurePoint, FString>(
+            FRedwebNativeSocket::EAutomationFailurePoint::SessionCreation, TEXT("Could not open the Windows WebSocket session")),
+        TPair<FRedwebNativeSocket::EAutomationFailurePoint, FString>(
+            FRedwebNativeSocket::EAutomationFailurePoint::ConnectionCreation, TEXT("Could not reach")),
+        TPair<FRedwebNativeSocket::EAutomationFailurePoint, FString>(
+            FRedwebNativeSocket::EAutomationFailurePoint::RequestCreation, TEXT("Could not create the WebSocket request"))
+    };
+    for (const TPair<FRedwebNativeSocket::EAutomationFailurePoint, FString>& Failure : CreationFailures)
+    {
+        FRedwebNativeSocket::FCallbacks FailureCallbacks;
+        FRedwebNativeSocket FailureSocket(BuiltUrl, MoveTemp(FailureCallbacks));
+        FailureSocket.AutomationFailurePoint = Failure.Key;
+        FString FailureError;
+        TestFalse(TEXT("A failed WinHTTP resource-creation stage aborts connection setup"),
+            FailureSocket.ConnectSocket(FailureError));
+        TestTrue(TEXT("The WinHTTP failure identifies its creation stage"), FailureError.Contains(Failure.Value));
+    }
+
+    FEvent* SendFailureEvent = FPlatformProcess::GetSynchEventFromPool(true);
+    FString SendFailureError;
+    FRedwebNativeSocket::FCallbacks SendFailureCallbacks;
+    SendFailureCallbacks.OnError = [&SendFailureError, SendFailureEvent](const FString& Error)
+    {
+        SendFailureError = Error;
+        SendFailureEvent->Trigger();
+    };
+    FRedwebNativeSocket SendFailureSocket(BuiltUrl, MoveTemp(SendFailureCallbacks));
+    HINTERNET NonWebSocketHandle = WinHttpOpen(TEXT("RedwebBP coverage"), WINHTTP_ACCESS_TYPE_NO_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    TestNotNull(TEXT("The WinHTTP send-failure test opens a real session handle"), NonWebSocketHandle);
+    if (NonWebSocketHandle)
+    {
+        SendFailureSocket.WebSocketHandle = NonWebSocketHandle;
+        SendFailureSocket.bConnected = true;
+        TestFalse(TEXT("WinHTTP rejects sending a WebSocket frame through a session handle"),
+            SendFailureSocket.Send(TEXT("{}")));
+        TestTrue(TEXT("The invalid WebSocket handle produces a send diagnostic"), SendFailureEvent->Wait(1000));
+        TestTrue(TEXT("The send diagnostic identifies the failed WinHTTP operation"),
+            SendFailureError.Contains(TEXT("WebSocket send failed")));
+        SendFailureSocket.CloseHandles();
+    }
+    FPlatformProcess::ReturnSynchEventToPool(SendFailureEvent);
+
+    URedwebSocketComponent* ThreadStartFailureComponent = NewObject<URedwebSocketComponent>();
+    URedwebAutomationEventReceiver* ThreadStartFailureReceiver = NewObject<URedwebAutomationEventReceiver>();
+    ThreadStartFailureComponent->ServerUrl = BuiltUrl;
+    ThreadStartFailureComponent->RoutePath.Empty();
+    ThreadStartFailureComponent->bAutoReconnect = false;
+    ThreadStartFailureComponent->OnError.AddDynamic(ThreadStartFailureReceiver, &URedwebAutomationEventReceiver::ReceiveError);
+    FRedwebNativeSocket::bFailNextThreadCreationForAutomation = true;
+    AddExpectedError(TEXT("Could not start the native WebSocket worker"), EAutomationExpectedErrorFlags::Contains, 1);
+    ThreadStartFailureComponent->StartSocket();
+    TestFalse(TEXT("The component releases a socket whose worker could not be created"), ThreadStartFailureComponent->Socket.IsValid());
+    TestEqual(TEXT("The component broadcasts the worker-creation failure"), ThreadStartFailureReceiver->Errors.Num(), 1);
+
+    FRedwebNativeSocket::FCallbacks StateGuardCallbacks;
+    FRedwebNativeSocket StateGuardSocket(BuiltUrl, MoveTemp(StateGuardCallbacks));
+    TestFalse(TEXT("An unstarted native socket rejects sends"), StateGuardSocket.Send(TEXT("{}")));
+    StateGuardSocket.bConnected = true;
+    TestFalse(TEXT("A connected flag without an open WinHTTP handle rejects sends safely"), StateGuardSocket.Send(TEXT("{}")));
+    StateGuardSocket.bConnected = false;
+
+    int32 CloseCallbackCount = 0;
+    FRedwebNativeSocket::FCallbacks CloseIdempotencyCallbacks;
+    CloseIdempotencyCallbacks.OnClosed = [&CloseCallbackCount](int32, const FString&, bool) { ++CloseCallbackCount; };
+    FRedwebNativeSocket CloseIdempotencySocket(BuiltUrl, MoveTemp(CloseIdempotencyCallbacks));
+    CloseIdempotencySocket.ReportClosed(1000, TEXT("first"), true);
+    CloseIdempotencySocket.ReportClosed(1001, TEXT("second"), false);
+    TestEqual(TEXT("A native connection reports only its first close notification"), CloseCallbackCount, 1);
+
+    int32 UnexpectedReceiveEndStatus = 0;
+    FString UnexpectedReceiveEndReason;
+    FRedwebNativeSocket::FCallbacks UnexpectedReceiveEndCallbacks;
+    UnexpectedReceiveEndCallbacks.OnClosed = [&UnexpectedReceiveEndStatus, &UnexpectedReceiveEndReason](
+        const int32 StatusCode, const FString& Reason, bool)
+    {
+        UnexpectedReceiveEndStatus = StatusCode;
+        UnexpectedReceiveEndReason = Reason;
+    };
+    FRedwebNativeSocket UnexpectedReceiveEndSocket(BuiltUrl, MoveTemp(UnexpectedReceiveEndCallbacks));
+    UnexpectedReceiveEndSocket.ReceiveLoop();
+    TestEqual(TEXT("An unexpected empty receive loop reports an abnormal close"), UnexpectedReceiveEndStatus, 1006);
+    TestEqual(TEXT("An unexpected empty receive loop explains why it ended"), UnexpectedReceiveEndReason,
+        FString(TEXT("WebSocket receive loop ended.")));
+
+    UrlCases->StartConnectionTimeout();
 
     FEvent* ConnectedEvent = FPlatformProcess::GetSynchEventFromPool(true);
     FEvent* MessageEvent = FPlatformProcess::GetSynchEventFromPool(false);
@@ -102,6 +199,7 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
         FPlatformProcess::ReturnSynchEventToPool(ClosedEvent);
         return false;
     }
+    TestFalse(TEXT("A running native transport worker cannot be started twice"), Socket->Start());
 
     const bool bConnected = ConnectedEvent->Wait(10000);
     TestTrue(TEXT("The native transport connects to the real Redweb fixture"), bConnected);
@@ -272,6 +370,58 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
     }
     FPlatformProcess::ReturnSynchEventToPool(InvalidUrlErrorEvent);
     FPlatformProcess::ReturnSynchEventToPool(InvalidUrlClosedEvent);
+
+    FEvent* UnsupportedSchemeErrorEvent = FPlatformProcess::GetSynchEventFromPool(true);
+    FString FtpUrl = BuiltUrl;
+    FtpUrl.ReplaceInline(TEXT("ws://"), TEXT("ftp://"), ESearchCase::IgnoreCase);
+    FRedwebNativeSocket::FCallbacks UnsupportedSchemeCallbacks;
+    UnsupportedSchemeCallbacks.OnError = [UnsupportedSchemeErrorEvent](const FString&) { UnsupportedSchemeErrorEvent->Trigger(); };
+    FRedwebNativeSocket UnsupportedSchemeSocket(FtpUrl, MoveTemp(UnsupportedSchemeCallbacks));
+    const bool bUnsupportedSchemeStarted = UnsupportedSchemeSocket.Start();
+    TestTrue(TEXT("The unsupported-scheme worker starts before URL validation"), bUnsupportedSchemeStarted);
+    if (bUnsupportedSchemeStarted)
+    {
+        TestTrue(TEXT("WinHTTP rejects a validly parsed non-HTTP URL scheme"), UnsupportedSchemeErrorEvent->Wait(5000));
+        UnsupportedSchemeSocket.Shutdown();
+    }
+    FPlatformProcess::ReturnSynchEventToPool(UnsupportedSchemeErrorEvent);
+
+    FEvent* SecureHandshakeErrorEvent = FPlatformProcess::GetSynchEventFromPool(true);
+    FString WssUrl = BuiltUrl;
+    WssUrl.ReplaceInline(TEXT("ws://"), TEXT("wss://"), ESearchCase::IgnoreCase);
+    FRedwebNativeSocket::FCallbacks SecureHandshakeCallbacks;
+    SecureHandshakeCallbacks.OnError = [SecureHandshakeErrorEvent](const FString&) { SecureHandshakeErrorEvent->Trigger(); };
+    FRedwebNativeSocket SecureHandshakeSocket(WssUrl, MoveTemp(SecureHandshakeCallbacks));
+    const bool bSecureHandshakeStarted = SecureHandshakeSocket.Start();
+    TestTrue(TEXT("The WSS conversion scenario starts a real native worker"), bSecureHandshakeStarted);
+    if (bSecureHandshakeStarted)
+    {
+        TestTrue(TEXT("WinHTTP reports the TLS failure from the non-TLS Redweb fixture"), SecureHandshakeErrorEvent->Wait(10000));
+        SecureHandshakeSocket.Shutdown();
+    }
+    FPlatformProcess::ReturnSynchEventToPool(SecureHandshakeErrorEvent);
+
+    FRedwebNativeSocket::FCallbacks CancelledHandshakeCallbacks;
+    FRedwebNativeSocket CancelledHandshakeSocket(BuiltUrl, MoveTemp(CancelledHandshakeCallbacks));
+    CancelledHandshakeSocket.bStopRequested = true;
+    FString CancelledHandshakeError;
+    TestFalse(TEXT("A successful real handshake is discarded when shutdown wins the handle-install race"),
+        CancelledHandshakeSocket.ConnectSocket(CancelledHandshakeError));
+    TestEqual(TEXT("The discarded handshake reports cancellation"), CancelledHandshakeError,
+        FString(TEXT("Connection was cancelled.")));
+
+    FEvent* ClientShutdownConnectedEvent = FPlatformProcess::GetSynchEventFromPool(true);
+    FRedwebNativeSocket::FCallbacks ClientShutdownCallbacks;
+    ClientShutdownCallbacks.OnConnected = [ClientShutdownConnectedEvent]() { ClientShutdownConnectedEvent->Trigger(); };
+    FRedwebNativeSocket ClientShutdownSocket(BuiltUrl, MoveTemp(ClientShutdownCallbacks));
+    const bool bClientShutdownStarted = ClientShutdownSocket.Start();
+    TestTrue(TEXT("The client-shutdown transport worker starts"), bClientShutdownStarted);
+    if (bClientShutdownStarted)
+    {
+        TestTrue(TEXT("The client-shutdown scenario reaches a real WebSocket connection"), ClientShutdownConnectedEvent->Wait(10000));
+        ClientShutdownSocket.Shutdown(1000, TEXT("client-shutdown"));
+    }
+    FPlatformProcess::ReturnSynchEventToPool(ClientShutdownConnectedEvent);
 
     FEvent* AbruptConnectedEvent = FPlatformProcess::GetSynchEventFromPool(true);
     FEvent* AbruptErrorEvent = FPlatformProcess::GetSynchEventFromPool(true);

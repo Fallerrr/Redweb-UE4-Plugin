@@ -4,9 +4,25 @@
   "Category": "Tests",
   "Description": "Code-free host for RedwebBP Unreal automation tests.",
   "AdditionalPluginDirectories": [
-    "../.."
+    "../../.."
   ],
   "Plugins": [
+    {
+      "Name": "SteamVR",
+      "Enabled": false
+    },
+    {
+      "Name": "OculusVR",
+      "Enabled": false
+    },
+    {
+      "Name": "OpenXR",
+      "Enabled": false
+    },
+    {
+      "Name": "WindowsMixedReality",
+      "Enabled": false
+    },
     {
       "Name": "RedwebBP",
       "Enabled": true
