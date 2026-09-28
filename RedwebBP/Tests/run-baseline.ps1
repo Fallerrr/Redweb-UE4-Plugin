@@ -3,14 +3,23 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$pluginRoot = Split-Path -Parent $PSScriptRoot
 $integration = Join-Path $PSScriptRoot 'Integration'
 $testProject = Join-Path $PSScriptRoot 'RedwebBPTestHost\RedwebBPTestHost.uproject'
 
+npm --prefix $integration ci --ignore-scripts
+if ($LASTEXITCODE -ne 0) { throw 'Could not install the pinned Redweb integration fixture.' }
+
+& (Join-Path $integration 'node_modules\.bin\c8.cmd') `
+    --include=Tests/lib/automationReport.cjs `
+    --include=Tests/verify-automation-report.cjs `
+    --temp-directory=Tests/Integration/.nyc_output `
+    --report-dir=Tests/Integration/coverage/automation-report `
+    --check-coverage --lines=100 --branches=100 --functions=100 --statements=100 `
+    node --test Tests/automation-report.test.cjs
+if ($LASTEXITCODE -ne 0) { throw 'The Unreal automation report gate failed.' }
+
 Push-Location $integration
 try {
-    npm ci --ignore-scripts
-    if ($LASTEXITCODE -ne 0) { throw 'Could not install the pinned Redweb integration fixture.' }
     npm test
     if ($LASTEXITCODE -ne 0) { throw 'The real Redweb server integration test failed.' }
 } finally {
@@ -33,7 +42,11 @@ $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('redwebbp-tests-' + [gu
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 $fixtureOut = Join-Path $tempRoot 'fixture.out.log'
 $fixtureErr = Join-Path $tempRoot 'fixture.err.log'
-$editorLog = Join-Path $tempRoot 'unreal-editor.log'
+$resultsRoot = Join-Path $PSScriptRoot 'results'
+$reportRoot = Join-Path $resultsRoot ([guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $reportRoot -Force | Out-Null
+$editorLog = Join-Path $reportRoot 'unreal-editor.log'
+$automationReport = Join-Path $reportRoot 'index.json'
 $fixture = Start-Process -FilePath 'node' `
     -ArgumentList @('fixture.cjs') `
     -WorkingDirectory $integration `
@@ -58,12 +71,18 @@ try {
         '-unattended', '-nop4', '-nosplash', '-NullRHI',
         '-ExecCmds="Automation RunTests RedwebBP; Quit"',
         '-testexit="Automation Test Queue Empty"',
+        "-ReportOutputPath=$reportRoot",
         "-abslog=$editorLog"
     )
     $editor = Start-Process -FilePath $UnrealEditorCmd -ArgumentList $arguments -Wait -PassThru
     if ($editor.ExitCode -ne 0) {
         $log = if (Test-Path -LiteralPath $editorLog) { Get-Content -Raw $editorLog } else { '<Unreal produced no log>' }
         throw "Unreal automation failed with exit code $($editor.ExitCode):`n$log"
+    }
+
+    node (Join-Path $PSScriptRoot 'verify-automation-report.cjs') $automationReport
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unreal automation did not report successful completion of all required RedwebBP tests. Report retained at $automationReport"
     }
 } finally {
     if (-not $fixture.HasExited) { Stop-Process -Id $fixture.Id -Force }
