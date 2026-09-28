@@ -162,6 +162,16 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
             Component->SendJson(LargeJson, TEXT("echo")));
         CheckNextEcho(TEXT("The native receive loop reassembles the full large text message"), TEXT("text"), LargeText);
 
+        TestTrue(TEXT("SendRaw can request an empty text frame from the real server"),
+            Component->SendRaw(TEXT("{\"type\":\"echo\",\"fixtureCommand\":\"empty\"}")));
+        const bool bEmptyFrameReceived = MessageEvent->Wait(5000);
+        TestTrue(TEXT("The native receive loop delivers an empty text frame"), bEmptyFrameReceived);
+        if (bEmptyFrameReceived)
+        {
+            FScopeLock Lock(&ResultLock);
+            TestTrue(TEXT("The delivered empty frame remains empty"), ReceivedMessages.Last().IsEmpty());
+        }
+
         TestTrue(TEXT("SendRaw can request a binary response from the real server"),
             Component->SendRaw(TEXT("{\"type\":\"echo\",\"fixtureCommand\":\"binary\"}")));
         const bool bBinaryRejected = TransportErrorEvent->Wait(5000);
@@ -223,6 +233,99 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
     FPlatformProcess::ReturnSynchEventToPool(MessageEvent);
     FPlatformProcess::ReturnSynchEventToPool(TransportErrorEvent);
     FPlatformProcess::ReturnSynchEventToPool(ClosedEvent);
+
+    FEvent* InvalidUrlErrorEvent = FPlatformProcess::GetSynchEventFromPool(true);
+    FEvent* InvalidUrlClosedEvent = FPlatformProcess::GetSynchEventFromPool(true);
+    FCriticalSection InvalidUrlResultLock;
+    FString InvalidUrlError;
+    int32 InvalidUrlCloseCode = 0;
+    FRedwebNativeSocket::FCallbacks InvalidUrlCallbacks;
+    InvalidUrlCallbacks.OnError = [&InvalidUrlResultLock, &InvalidUrlError, InvalidUrlErrorEvent](const FString& Error)
+    {
+        FScopeLock Lock(&InvalidUrlResultLock);
+        InvalidUrlError = Error;
+        InvalidUrlErrorEvent->Trigger();
+    };
+    InvalidUrlCallbacks.OnClosed = [&InvalidUrlResultLock, &InvalidUrlCloseCode, InvalidUrlClosedEvent](
+        const int32 StatusCode, const FString&, const bool)
+    {
+        FScopeLock Lock(&InvalidUrlResultLock);
+        InvalidUrlCloseCode = StatusCode;
+        InvalidUrlClosedEvent->Trigger();
+    };
+    FRedwebNativeSocket InvalidUrlSocket(TEXT("not a websocket URL"), MoveTemp(InvalidUrlCallbacks));
+    const bool bInvalidUrlStarted = InvalidUrlSocket.Start();
+    TestTrue(TEXT("The invalid-URL transport worker starts"), bInvalidUrlStarted);
+    if (bInvalidUrlStarted)
+    {
+        const bool bInvalidUrlReportedError = InvalidUrlErrorEvent->Wait(5000);
+        const bool bInvalidUrlReportedClose = InvalidUrlClosedEvent->Wait(5000);
+        TestTrue(TEXT("Invalid URLs report a connection error"), bInvalidUrlReportedError);
+        TestTrue(TEXT("Invalid URLs report an abnormal close"), bInvalidUrlReportedClose);
+        if (bInvalidUrlReportedError && bInvalidUrlReportedClose)
+        {
+            FScopeLock Lock(&InvalidUrlResultLock);
+            TestTrue(TEXT("The URL diagnostic identifies the malformed address"), InvalidUrlError.Contains(TEXT("Invalid WebSocket URL")));
+            TestEqual(TEXT("Invalid URLs use the abnormal-closure status"), InvalidUrlCloseCode, 1006);
+        }
+        InvalidUrlSocket.Shutdown();
+    }
+    FPlatformProcess::ReturnSynchEventToPool(InvalidUrlErrorEvent);
+    FPlatformProcess::ReturnSynchEventToPool(InvalidUrlClosedEvent);
+
+    FEvent* AbruptConnectedEvent = FPlatformProcess::GetSynchEventFromPool(true);
+    FEvent* AbruptErrorEvent = FPlatformProcess::GetSynchEventFromPool(true);
+    FEvent* AbruptClosedEvent = FPlatformProcess::GetSynchEventFromPool(true);
+    FCriticalSection AbruptResultLock;
+    FString AbruptError;
+    int32 AbruptCloseCode = 0;
+    bool bAbruptCloseWasClean = true;
+    FRedwebNativeSocket::FCallbacks AbruptCallbacks;
+    AbruptCallbacks.OnConnected = [AbruptConnectedEvent]() { AbruptConnectedEvent->Trigger(); };
+    AbruptCallbacks.OnError = [&AbruptResultLock, &AbruptError, AbruptErrorEvent](const FString& Error)
+    {
+        FScopeLock Lock(&AbruptResultLock);
+        AbruptError = Error;
+        AbruptErrorEvent->Trigger();
+    };
+    AbruptCallbacks.OnClosed = [&AbruptResultLock, &AbruptCloseCode, &bAbruptCloseWasClean, AbruptClosedEvent](
+        const int32 StatusCode, const FString&, const bool bWasClean)
+    {
+        FScopeLock Lock(&AbruptResultLock);
+        AbruptCloseCode = StatusCode;
+        bAbruptCloseWasClean = bWasClean;
+        AbruptClosedEvent->Trigger();
+    };
+    TSharedPtr<FRedwebNativeSocket, ESPMode::ThreadSafe> AbruptSocket = MakeShared<FRedwebNativeSocket, ESPMode::ThreadSafe>(
+        BuiltUrl, MoveTemp(AbruptCallbacks));
+    const bool bAbruptSocketStarted = AbruptSocket->Start();
+    TestTrue(TEXT("The abrupt-close transport worker starts"), bAbruptSocketStarted);
+    if (bAbruptSocketStarted)
+    {
+        const bool bAbruptSocketConnected = AbruptConnectedEvent->Wait(10000);
+        TestTrue(TEXT("The abrupt-close transport connects to the real Redweb fixture"), bAbruptSocketConnected);
+        if (bAbruptSocketConnected)
+        {
+            TestTrue(TEXT("The native transport sends before the peer aborts"),
+                AbruptSocket->Send(TEXT("{\"type\":\"echo\",\"fixtureCommand\":\"abort\"}")));
+            const bool bAbruptErrorReported = AbruptErrorEvent->Wait(5000);
+            const bool bAbruptCloseReported = AbruptClosedEvent->Wait(5000);
+            TestTrue(TEXT("The native receive failure is reported"), bAbruptErrorReported);
+            TestTrue(TEXT("The native transport reports an abnormal close"), bAbruptCloseReported);
+            if (bAbruptErrorReported && bAbruptCloseReported)
+            {
+                FScopeLock Lock(&AbruptResultLock);
+                TestTrue(TEXT("The receive diagnostic identifies the transport failure"), AbruptError.Contains(TEXT("WebSocket receive failed")));
+                TestEqual(TEXT("An abrupt peer disconnect maps to status 1006"), AbruptCloseCode, 1006);
+                TestFalse(TEXT("An abrupt peer disconnect is not clean"), bAbruptCloseWasClean);
+            }
+        }
+        AbruptSocket->Shutdown();
+    }
+    AbruptSocket.Reset();
+    FPlatformProcess::ReturnSynchEventToPool(AbruptConnectedEvent);
+    FPlatformProcess::ReturnSynchEventToPool(AbruptErrorEvent);
+    FPlatformProcess::ReturnSynchEventToPool(AbruptClosedEvent);
     return true;
 #else
     AddError(TEXT("The native transport integration test is Windows-only."));

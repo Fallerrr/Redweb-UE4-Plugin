@@ -15,6 +15,14 @@ class EchoHandler extends BaseHandler {
       socket.close(4001, 'fixture-close');
       return;
     }
+    if (message.fixtureCommand === 'empty') {
+      socket.send('');
+      return;
+    }
+    if (message.fixtureCommand === 'abort') {
+      socket.terminate();
+      return;
+    }
     socket.sendJson({ type: 'echo', text: message.text, data: message.data });
   }
 }
