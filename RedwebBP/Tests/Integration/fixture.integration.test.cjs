@@ -43,3 +43,42 @@ test('Redweb 0.16.5 accepts and echoes the plugin baseline raw message over real
     v: '1', type: 'echo', payload: { text: 'current' }, requestId: 'r1',
   });
 });
+
+test('the real Redweb route delivers a large text message without truncation', { timeout: 10000 }, async t => {
+  const app = defineApp({ sockets: [EchoRoute], port: 0, bind: '127.0.0.1', signals: false, logger: null });
+  await app.run();
+  t.after(() => app.shutdown());
+
+  const socket = new WebSocket(`ws://127.0.0.1:${app.server.address().port}/socket`);
+  t.after(() => socket.terminate());
+  await once(socket, 'open');
+
+  const text = 'x'.repeat(128 * 1024);
+  const response = once(socket, 'message');
+  socket.send(JSON.stringify({ type: 'echo', text }));
+  const [frame, isBinary] = await response;
+  assert.equal(isBinary, false);
+  assert.deepEqual(JSON.parse(frame.toString()), { type: 'echo', text });
+});
+
+test('the real Redweb route can send binary frames and a reasoned close', { timeout: 10000 }, async t => {
+  const app = defineApp({ sockets: [EchoRoute], port: 0, bind: '127.0.0.1', signals: false, logger: null });
+  await app.run();
+  t.after(() => app.shutdown());
+
+  const socket = new WebSocket(`ws://127.0.0.1:${app.server.address().port}/socket`);
+  t.after(() => socket.terminate());
+  await once(socket, 'open');
+
+  const binaryFrame = once(socket, 'message');
+  socket.send('{"type":"echo","fixtureCommand":"binary"}');
+  const [bytes, isBinary] = await binaryFrame;
+  assert.equal(isBinary, true);
+  assert.deepEqual(bytes, Buffer.from([0xde, 0xad, 0xbe, 0xef]));
+
+  const closed = once(socket, 'close');
+  socket.send('{"type":"echo","fixtureCommand":"close"}');
+  const [code, reason] = await closed;
+  assert.equal(code, 4001);
+  assert.equal(reason.toString(), 'fixture-close');
+});

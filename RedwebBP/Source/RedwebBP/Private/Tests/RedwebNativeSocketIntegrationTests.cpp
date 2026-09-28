@@ -50,10 +50,15 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("The URL builder skips query entries with empty keys"), BuiltUrl.Contains(TEXT("&=")));
 
     FEvent* ConnectedEvent = FPlatformProcess::GetSynchEventFromPool(true);
-    FEvent* MessageEvent = FPlatformProcess::GetSynchEventFromPool(true);
+    FEvent* MessageEvent = FPlatformProcess::GetSynchEventFromPool(false);
+    FEvent* TransportErrorEvent = FPlatformProcess::GetSynchEventFromPool(true);
+    FEvent* ClosedEvent = FPlatformProcess::GetSynchEventFromPool(true);
     FCriticalSection ResultLock;
     TArray<FString> ReceivedMessages;
-    FString ConnectionError;
+    FString TransportError;
+    int32 ClosedStatusCode = 0;
+    FString ClosedReason;
+    bool bClosedCleanly = false;
 
     FRedwebNativeSocket::FCallbacks Callbacks;
     Callbacks.OnConnected = [ConnectedEvent]() { ConnectedEvent->Trigger(); };
@@ -63,10 +68,20 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
         ReceivedMessages.Add(Message);
         MessageEvent->Trigger();
     };
-    Callbacks.OnError = [&ResultLock, &ConnectionError](const FString& Error)
+    Callbacks.OnError = [&ResultLock, &TransportError, TransportErrorEvent](const FString& Error)
     {
         FScopeLock Lock(&ResultLock);
-        ConnectionError = Error;
+        TransportError = Error;
+        TransportErrorEvent->Trigger();
+    };
+    Callbacks.OnClosed = [&ResultLock, &ClosedStatusCode, &ClosedReason, &bClosedCleanly, ClosedEvent](
+        const int32 StatusCode, const FString& Reason, const bool bWasClean)
+    {
+        FScopeLock Lock(&ResultLock);
+        ClosedStatusCode = StatusCode;
+        ClosedReason = Reason;
+        bClosedCleanly = bWasClean;
+        ClosedEvent->Trigger();
     };
 
     TSharedPtr<FRedwebNativeSocket, ESPMode::ThreadSafe> Socket = MakeShared<FRedwebNativeSocket, ESPMode::ThreadSafe>(
@@ -83,6 +98,8 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
         Socket.Reset();
         FPlatformProcess::ReturnSynchEventToPool(ConnectedEvent);
         FPlatformProcess::ReturnSynchEventToPool(MessageEvent);
+        FPlatformProcess::ReturnSynchEventToPool(TransportErrorEvent);
+        FPlatformProcess::ReturnSynchEventToPool(ClosedEvent);
         return false;
     }
 
@@ -133,6 +150,40 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("SendRaw sends a connected client's frame"),
             Component->SendRaw(TEXT("{\"type\":\"echo\",\"text\":\"raw-send\"}")));
         CheckNextEcho(TEXT("The Redweb server echoes SendRaw"), TEXT("text"), TEXT("raw-send"));
+
+        FString LargeText;
+        LargeText.Reserve(128 * 1024);
+        for (int32 Index = 0; Index < 128 * 1024; ++Index)
+        {
+            LargeText.AppendChar(TEXT('x'));
+        }
+        const FString LargeJson = FString::Printf(TEXT("{\"text\":\"%s\"}"), *LargeText);
+        TestTrue(TEXT("SendJson sends a payload larger than the native receive buffer"),
+            Component->SendJson(LargeJson, TEXT("echo")));
+        CheckNextEcho(TEXT("The native receive loop reassembles the full large text message"), TEXT("text"), LargeText);
+
+        TestTrue(TEXT("SendRaw can request a binary response from the real server"),
+            Component->SendRaw(TEXT("{\"type\":\"echo\",\"fixtureCommand\":\"binary\"}")));
+        const bool bBinaryRejected = TransportErrorEvent->Wait(5000);
+        TestTrue(TEXT("The native transport reports unsupported binary frames"), bBinaryRejected);
+        {
+            FScopeLock Lock(&ResultLock);
+            TestTrue(TEXT("The binary-frame diagnostic identifies the unsupported frame"),
+                TransportError.Contains(TEXT("unsupported binary WebSocket frame")));
+            TransportError.Empty();
+        }
+
+        TestTrue(TEXT("SendRaw can ask the real server to close with a reason"),
+            Component->SendRaw(TEXT("{\"type\":\"echo\",\"fixtureCommand\":\"close\"}")));
+        const bool bRemoteClosed = ClosedEvent->Wait(5000);
+        TestTrue(TEXT("The native transport reports the remote close frame"), bRemoteClosed);
+        if (bRemoteClosed)
+        {
+            FScopeLock Lock(&ResultLock);
+            TestEqual(TEXT("The remote close status code is preserved"), ClosedStatusCode, 4001);
+            TestEqual(TEXT("The remote close reason is preserved"), ClosedReason, FString(TEXT("fixture-close")));
+            TestTrue(TEXT("The normal remote close is reported clean"), bClosedCleanly);
+        }
     }
 
     const FString CurrentUrl = FPlatformMisc::GetEnvironmentVariable(TEXT("REDWEBBP_CURRENT_TEST_URL")).IsEmpty()
@@ -144,20 +195,24 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
     CurrentCallbacks.OnError = [CurrentErrorEvent](const FString&) { CurrentErrorEvent->Trigger(); };
     CurrentCallbacks.OnConnected = [CurrentConnectedEvent]() { CurrentConnectedEvent->Trigger(); };
     FRedwebNativeSocket CurrentProtocolSocket(CurrentUrl, MoveTemp(CurrentCallbacks));
-    TestTrue(TEXT("The legacy transport test starts against the current protocol route"), CurrentProtocolSocket.Start());
-    const bool bCurrentProtocolRejected = CurrentErrorEvent->Wait(5000);
-    TestTrue(TEXT("Current Redweb rejects the legacy handshake without version negotiation"), bCurrentProtocolRejected);
-    TestFalse(TEXT("The legacy transport does not accidentally connect to the versioned route"),
-        CurrentConnectedEvent->Wait(100));
-    CurrentProtocolSocket.Shutdown();
+    const bool bCurrentProtocolStarted = CurrentProtocolSocket.Start();
+    TestTrue(TEXT("The legacy transport test starts against the current protocol route"), bCurrentProtocolStarted);
+    if (bCurrentProtocolStarted)
+    {
+        const bool bCurrentProtocolRejected = CurrentErrorEvent->Wait(5000);
+        TestTrue(TEXT("Current Redweb rejects the legacy handshake without version negotiation"), bCurrentProtocolRejected);
+        TestFalse(TEXT("The legacy transport does not accidentally connect to the versioned route"),
+            CurrentConnectedEvent->Wait(100));
+        CurrentProtocolSocket.Shutdown();
+    }
     FPlatformProcess::ReturnSynchEventToPool(CurrentErrorEvent);
     FPlatformProcess::ReturnSynchEventToPool(CurrentConnectedEvent);
 
     {
         FScopeLock Lock(&ResultLock);
-        if (!ConnectionError.IsEmpty())
+        if (!TransportError.IsEmpty())
         {
-            AddError(FString::Printf(TEXT("Native transport reported: %s"), *ConnectionError));
+            AddError(FString::Printf(TEXT("Native transport reported: %s"), *TransportError));
         }
     }
 
@@ -166,6 +221,8 @@ bool FRedwebNativeTransportIntegrationTest::RunTest(const FString& Parameters)
     Socket.Reset();
     FPlatformProcess::ReturnSynchEventToPool(ConnectedEvent);
     FPlatformProcess::ReturnSynchEventToPool(MessageEvent);
+    FPlatformProcess::ReturnSynchEventToPool(TransportErrorEvent);
+    FPlatformProcess::ReturnSynchEventToPool(ClosedEvent);
     return true;
 #else
     AddError(TEXT("The native transport integration test is Windows-only."));

@@ -7,6 +7,14 @@ const { z } = require('zod');
 class EchoHandler extends BaseHandler {
   constructor() { super('echo'); }
   onMessage(socket, message) {
+    if (message.fixtureCommand === 'binary') {
+      socket.send(Buffer.from([0xde, 0xad, 0xbe, 0xef]), { binary: true });
+      return;
+    }
+    if (message.fixtureCommand === 'close') {
+      socket.close(4001, 'fixture-close');
+      return;
+    }
     socket.sendJson({ type: 'echo', text: message.text, data: message.data });
   }
 }
