@@ -1,0 +1,6 @@
+Tests/Integration/node_modules/
+Tests/Integration/*.log
+Tests/Integration/coverage/
+Tests/Integration/.nyc_output/
+Tests/RedwebBPTestHost/Saved/
+Tests/RedwebBPTestHost/Intermediate/

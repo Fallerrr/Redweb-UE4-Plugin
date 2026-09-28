@@ -1,0 +1,15 @@
+{
+  "FileVersion": 3,
+  "EngineAssociation": "4.27",
+  "Category": "Tests",
+  "Description": "Code-free host for RedwebBP Unreal automation tests.",
+  "AdditionalPluginDirectories": [
+    "../.."
+  ],
+  "Plugins": [
+    {
+      "Name": "RedwebBP",
+      "Enabled": true
+    }
+  ]
+}

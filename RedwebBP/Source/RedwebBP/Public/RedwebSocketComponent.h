@@ -107,6 +107,11 @@ public:
     void SendHeartbeat();
 
 private:
+#if WITH_DEV_AUTOMATION_TESTS
+    friend class FRedwebLegacyCodecAutomationTest;
+    friend class FRedwebNativeTransportIntegrationTest;
+#endif
+
     TSharedPtr<FRedwebNativeSocket, ESPMode::ThreadSafe> Socket;
     FTimerHandle ReconnectTimerHandle;
     FTimerHandle HeartbeatTimerHandle;

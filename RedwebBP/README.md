@@ -51,3 +51,16 @@ This helps distinguish socket/plugin delay from Blueprint-side processing delay.
 - `Log Received Payloads`: disabled by default.
 
 For live gameplay, keep payload logging off. Movement/action-heavy matches can send enough packets that logging every JSON payload will cause visible framerate drops. The component still exposes all existing connection, reconnect, heartbeat, raw-message, typed-message, and JSON helper functionality.
+
+## Baseline Tests
+
+Before changing the wire protocol, run the characterization suite from this plugin directory:
+
+```powershell
+$env:UE4_EDITOR_CMD = 'C:\path\to\UE_4.27\Engine\Binaries\Win64\UE4Editor-Cmd.exe'
+./Tests/run-baseline.ps1
+```
+
+The suite uses a real Redweb 0.16.5 server, not mocks. It records the current compatibility boundary: raw `{ type, ...fields }` messages work on a legacy-compatible route, but a protocol-versioned route rejects the current handshake unless the client negotiates `redwebVersion=1` and sends the versioned envelope. Unreal automation tests characterize the Blueprint component's legacy JSON helpers and exercise its WinHTTP transport against that local server.
+
+The helper-level Unreal tests cover both branches in `ExtractTypedPayload` and `BuildJsonFromFields`. The executable Node integration fixture is enforced at 100% line, branch, function, and statement coverage. The Unreal tests require an installed UE 4.27 editor to compile and run; `UE4_EDITOR_CMD` must point to that installation. Keep protocol-upgrade work gated on a successful run of the Unreal automation suite and measured coverage for the plugin code.
