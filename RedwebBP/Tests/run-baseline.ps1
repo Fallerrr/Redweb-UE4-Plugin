@@ -56,8 +56,8 @@ try {
     $arguments = @(
         $testProject,
         '-unattended', '-nop4', '-nosplash', '-NullRHI',
-        '-ExecCmds=Automation RunTests RedwebBP;Quit',
-        '-testexit=Automation Test Queue Empty',
+        '-ExecCmds="Automation RunTests RedwebBP; Quit"',
+        '-testexit="Automation Test Queue Empty"',
         "-abslog=$editorLog"
     )
     $editor = Start-Process -FilePath $UnrealEditorCmd -ArgumentList $arguments -Wait -PassThru
