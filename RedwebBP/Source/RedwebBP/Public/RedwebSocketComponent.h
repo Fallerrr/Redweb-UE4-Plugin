@@ -107,6 +107,12 @@ public:
     void SendHeartbeat();
 
 private:
+#if WITH_DEV_AUTOMATION_TESTS
+    friend class FRedwebLegacyCodecAutomationTest;
+    friend class FRedwebNativeTransportIntegrationTest;
+    friend class FRedwebComponentStateAutomationTest;
+#endif
+
     TSharedPtr<FRedwebNativeSocket, ESPMode::ThreadSafe> Socket;
     FTimerHandle ReconnectTimerHandle;
     FTimerHandle HeartbeatTimerHandle;
@@ -133,5 +139,6 @@ private:
     void DispatchRawAndTypedMessage(const FString& Message);
 
     static bool ExtractTypedPayload(const FString& InMessage, FString& OutType, FString& OutPayloadJson);
+    static FString UpgradeLegacyMessage(const FString& Message);
     static FString BuildJsonFromFields(const FString& Type, const TArray<FRedwebKeyValue>& Fields);
 };

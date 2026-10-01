@@ -1,0 +1,16 @@
+{
+  "name": "redwebbp-integration-fixture",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "c8 --include=echo-route.cjs --check-coverage --lines=100 --branches=100 --functions=100 --statements=100 node --test fixture.integration.test.cjs"
+  },
+  "dependencies": {
+    "redweb": "0.16.5",
+    "ws": "8.21.3",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "c8": "10.1.3"
+  }
+}
